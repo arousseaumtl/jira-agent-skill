@@ -1,0 +1,8 @@
+# Credentials — never commit these
+.env
+.env.*
+*.env
+
+# Editor/OS noise
+.DS_Store
+*.swp
