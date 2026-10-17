@@ -1,25 +1,43 @@
 #!/usr/bin/env bash
-# jira.sh — read-only Jira Cloud board queries.
-# Env: JIRA_DOMAIN, JIRA_EMAIL, JIRA_TOKEN (required).
+# jira.sh — Jira Cloud CLI: generic REST/Agile passthrough + curated helpers.
+#
+# Hard dependencies: bash, curl.
+# Optional: jq (pretty output / TSV), python3 (URL encoding, JSON parsing).
+#          Without them the script still works — it emits raw JSON, which the
+#          calling agent can parse.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
 Usage: jira.sh <command> [args]
 
-  boards [PROJECT_KEY]            List boards (optionally for one project)
-  board <BOARD_ID>                Board details
-  sprints <BOARD_ID>              Sprints on a board (active first)
-  sprint <SPRINT_ID>              Sprint details
-  issues <SPRINT_ID> [--limit N]  Issues in a sprint
-  search "<JQL>" [--limit N]      JQL search (first page, API caps at 100)
-  count "<JQL>"                   Total matches, fully paginated (API has no total field)
-  users "<name>"                  Resolve display name/email to accountId (for JQL assignee)
-  projects                        List projects (key, name, lead)
-  issue <ISSUE_KEY>               Full issue detail
+  Generic (covers the whole Jira REST spec):
+    api <METHOD> <path> [json-body]   Call any endpoint, e.g.
+      api GET /rest/api/3/issue/PROJ-123
+      api GET "/rest/api/3/issue/PROJ-123?fields=summary,status"
+      api POST /rest/api/3/issue/PROJ-123/comment '{"body":"hi"}'
+      api PUT /rest/api/3/issue/PROJ-123 '{"update":{"description":["new"]}}'
+      api DELETE /rest/api/3/attachment/42
+    myself                            Who is the authenticated account?
 
-Env: JIRA_DOMAIN (e.g. acme), JIRA_EMAIL, JIRA_TOKEN
-      (env vars, or a .env in your working directory, or ~/.env)
+  Curated:
+    boards [PROJECT_KEY]              List boards (optionally for one project)
+    board <BOARD_ID>                  Board details
+    sprints <BOARD_ID>                Sprints (active first, then closed)
+    sprint <SPRINT_ID>                Sprint details
+    issues <SPRINT_ID> [--limit N]    Issues in a sprint
+    search "<JQL>" [--limit N]        JQL search, first page (API caps at 100)
+    count "<JQL>"                     Total matches, fully paginated (no total field in API)
+    users "<name>"                    Resolve display name/email to accountId
+    projects                          List software projects (key, name, lead)
+    issue <ISSUE_KEY>                 Full issue detail (description, links, ...)
+
+Output: tab-separated one-line-per-item when jq is installed, otherwise raw
+JSON. `api` always outputs the raw response JSON (pretty-printed if jq exists).
+
+Env (never hardcode, never echo): JIRA_DOMAIN, JIRA_EMAIL, JIRA_TOKEN
+(resolved from environment, then ./.env, then ~/.env; JIRA_API_TOKEN aliases
+JIRA_TOKEN). See references/api.md for the endpoint map.
 EOF
   exit 1
 }
@@ -65,49 +83,118 @@ domain="${JIRA_DOMAIN%.atlassian.net}"
 BASE="https://${domain}.atlassian.net"
 AUTH="-u ${JIRA_EMAIL}:${JIRA_TOKEN}"
 
-api() { # api <path> [extra curl args...]
-  local path="$1"; shift
-  curl -sS --fail-with-body $AUTH "$@" "$BASE$path"
+HAVE_JQ=0; command -v jq >/dev/null 2>&1 && HAVE_JQ=1
+HAVE_PY=0; command -v python3 >/dev/null 2>&1 && HAVE_PY=1
+
+api() { # api <method> <path> [json-body]
+  local method="$1" path="$2" body="${3:-}"
+  [[ "$path" == /* ]] || path="/$path"
+  local args=(-sS --fail-with-body -X "$method" $AUTH)
+  [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" --data "$body")
+  curl "${args[@]}" "$BASE$path"
+}
+
+urlencode() {
+  if [[ $HAVE_PY == 1 ]]; then
+    python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"
+  else
+    local s="$1" out="" c i hex
+    for ((i=0; i<${#s}; i++)); do
+      c="${s:i:1}"
+      case "$c" in
+        [a-zA-Z0-9.~_-]) out+="$c" ;;
+        *) printf -v hex '%%%02X' "'$c"; out+="$hex" ;;
+      esac
+    done
+    printf '%s' "$out"
+  fi
+}
+
+pretty() { if [[ $HAVE_JQ == 1 ]]; then jq '.'; else cat; fi; }
+
+# Extract one top-level string field from compact JSON without jq/python.
+json_str() { # json_str <key> <json>
+  sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' <<<"$2" | head -n1
+}
+
+# Count top-level issues in a /search/jql response without jq/python.
+# Each issue object starts with {"id":" (string id); Jira field objects
+# (status, priority, ...) use numeric ids, so they never match.
+issue_count() {
+  grep -o '"id":"' <<<"$1" | wc -l | tr -d ' '
 }
 
 fmt_issues() {
-  # Tab-separated: key, status, assignee, priority, summary
-  # api/2 returns strings, api/3 returns objects — handle both
-  jq -r '.issues[]? | [
-    .key,
-    (.fields.status.name // .fields.status // "unknown"),
-    (.fields.assignee.displayName // .fields.assignee // "unassigned"),
-    (.fields.priority.name // .fields.priority // "None"),
-    (.fields.summary // "")
-  ] | @tsv'
+  if [[ $HAVE_JQ == 1 ]]; then
+    # api/2 returns strings, api/3 returns objects — handle both
+    jq -r '.issues[]? | [
+      .key,
+      (.fields.status.name // .fields.status // "unknown"),
+      (.fields.assignee.displayName // .fields.assignee // "unassigned"),
+      (.fields.priority.name // .fields.priority // "None"),
+      (.fields.summary // "")
+    ] | @tsv'
+  else
+    pretty
+  fi
 }
 
 cmd="${1:-}"; shift || true
 limit=""
 case "$cmd" in
+  api)
+    method="${1:-GET}"; shift || true
+    path="${1:-}"; [[ -n "$path" ]] || usage
+    shift || true
+    body="${1:-}"
+    api "$method" "$path" "$body" | pretty
+    ;;
+  myself)
+    api GET /rest/api/3/myself | pretty
+    ;;
   boards)
     path="/rest/agile/1.0/board?maxResults=50"
     if [[ -n "${1:-}" ]]; then path="/rest/agile/1.0/board?projectKey=$1&maxResults=50"; fi
-    api "$path" | # list endpoint omits project; `board <id>` shows it
-    jq -r '.values[]? | [.id, .name, .type] | @tsv'
+    # list endpoint omits project; `board <id>` shows it
+    if [[ $HAVE_JQ == 1 ]]; then
+      api GET "$path" | jq -r '.values[]? | [.id, .name, .type] | @tsv'
+    else
+      api GET "$path" | pretty
+    fi
     ;;
   board)
-    api "/rest/agile/1.0/board/$1" | jq -r '. as $b | [$b.id, $b.name, $b.type, ($b.location.projectKey // "")] | @tsv'
+    json=$(api GET "/rest/agile/1.0/board/$1")
+    if [[ $HAVE_JQ == 1 ]]; then
+      jq -r '. as $b | [$b.id, $b.name, $b.type, ($b.location.projectKey // "")] | @tsv' <<<"$json"
+    else
+      pretty <<<"$json"
+    fi
     ;;
   sprints)
-    if ! json=$(api "/rest/agile/1.0/board/$1/sprint?maxResults=50" 2>&1); then
+    if ! json=$(api GET "/rest/agile/1.0/board/$1/sprint?maxResults=50" 2>&1); then
       echo "error: board does not support sprints (kanban/simple board) — use: jira.sh search \"project = <KEY> AND statusCategory != Done\"" >&2
       exit 2
     fi
-    printf '%s' "$json" | jq -r '.values[]? | select(.state=="active" or .state=="future") | [.id, .name, .state] | @tsv'
-    echo "--- closed ---"
-    if ! json=$(api "/rest/agile/1.0/board/$1/sprint?state=closed&maxResults=10" 2>/dev/null); then
-      echo "(no closed sprints)"; exit 0
+    if [[ $HAVE_JQ == 1 ]]; then
+      jq -r '.values[]? | select(.state=="active" or .state=="future") | [.id, .name, .state] | @tsv' <<<"$json"
+      echo "--- closed ---"
+      if json=$(api GET "/rest/agile/1.0/board/$1/sprint?state=closed&maxResults=10" 2>/dev/null); then
+        jq -r '.values[]? | [.id, .name, .state, .endDate // ""] | @tsv' <<<"$json"
+      else
+        echo "(no closed sprints)"
+      fi
+    else
+      echo "active/future + closed sprints:"
+      pretty <<<"$json"
     fi
-    printf '%s' "$json" | jq -r '.values[]? | [.id, .name, .state, .endDate] | @tsv'
     ;;
   sprint)
-    api "/rest/agile/1.0/sprint/$1" | jq -r '. as $s | [$s.id, $s.name, $s.state, $s.startDate, $s.endDate, ($s.goal // "")] | @tsv'
+    json=$(api GET "/rest/agile/1.0/sprint/$1")
+    if [[ $HAVE_JQ == 1 ]]; then
+      jq -r '. as $s | [$s.id, $s.name, $s.state, $s.startDate, $s.endDate, ($s.goal // "")] | @tsv' <<<"$json"
+    else
+      pretty <<<"$json"
+    fi
     ;;
   issues)
     shift
@@ -120,7 +207,7 @@ case "$cmd" in
     done
     [[ -n "$sprint_id" ]] || usage
     mr="${limit:-50}"
-    api "/rest/agile/1.0/sprint/$sprint_id/issue?maxResults=$mr" | fmt_issues
+    api GET "/rest/agile/1.0/sprint/$sprint_id/issue?maxResults=$mr" | fmt_issues
     ;;
   search)
     jql="$1"; shift || true
@@ -132,25 +219,31 @@ case "$cmd" in
     done
     [[ -n "$jql" ]] || usage
     mr="${limit:-50}"
-    encoded=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$jql")
-    api "/rest/api/3/search/jql?jql=${encoded}&maxResults=${mr}&fields=summary,status,assignee,priority,labels" | fmt_issues
+    encoded=$(urlencode "$jql")
+    api GET "/rest/api/3/search/jql?jql=${encoded}&maxResults=${mr}&fields=summary,status,assignee,priority,labels" | fmt_issues
     ;;
   count)
     jql="$1"; shift || true
     [[ -n "$jql" ]] || usage
-    encoded=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$jql")
+    encoded=$(urlencode "$jql")
     total=0; next=""
     while :; do
       url="/rest/api/3/search/jql?jql=${encoded}&maxResults=100"
       if [[ -n "$next" ]]; then
-        nextenc=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$next")
-        url="${url}&nextPageToken=${nextenc}"
+        url="${url}&nextPageToken=${next}"
       fi
-      json=$(api "$url")
-      n=$(jq '.issues | length' <<<"$json")
+      json=$(api GET "$url")
+      if [[ $HAVE_JQ == 1 ]]; then
+        n=$(jq '.issues | length' <<<"$json")
+        last=$(jq -r '.isLast // false' <<<"$json")
+        next=$(jq -r '.nextPageToken // empty' <<<"$json")
+      else
+        n=$(issue_count "$json")
+        last="false"
+        grep -q '"isLast":true' <<<"$json" && last="true"
+        next=$(json_str nextPageToken "$json")
+      fi
       total=$((total + n))
-      last=$(jq -r '.isLast // false' <<<"$json")
-      next=$(jq -r '.nextPageToken // empty' <<<"$json")
       # isLast is unreliable: also stop on empty pages or missing token
       if [[ "$last" == "true" || -z "$next" || "$n" == "0" ]]; then break; fi
     done
@@ -159,17 +252,26 @@ case "$cmd" in
   users)
     q="$1"; shift || true
     [[ -n "$q" ]] || usage
-    encoded=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$q")
-    api "/rest/api/3/user/search?query=${encoded}&maxResults=20" \
-      | jq -r '.[] | [.accountId, .displayName, (.emailAddress // "")] | @tsv'
+    encoded=$(urlencode "$q")
+    json=$(api GET "/rest/api/3/user/search?query=${encoded}&maxResults=20")
+    if [[ $HAVE_JQ == 1 ]]; then
+      jq -r '.[] | [.accountId, .displayName, (.emailAddress // "")] | @tsv' <<<"$json"
+    else
+      pretty <<<"$json"
+    fi
     ;;
   projects)
-    api "/rest/api/3/project?maxResults=100" \
-      | jq -r '.[] | select(.projectTypeKey=="software") | [.key, .name, (.projectLead.displayName // "")] | @tsv'
+    json=$(api GET "/rest/api/3/project?maxResults=100")
+    if [[ $HAVE_JQ == 1 ]]; then
+      jq -r '.[] | select(.projectTypeKey=="software") | [.key, .name, (.projectLead.displayName // "")] | @tsv' <<<"$json"
+    else
+      pretty <<<"$json"
+    fi
     ;;
   issue)
-    api "/rest/api/2/issue/$1?fields=summary,status,assignee,reporter,creator,priority,labels,issuetype,created,updated,due,sprint,description" \
-      | jq -r '
+    json=$(api GET "/rest/api/2/issue/$1?fields=summary,status,assignee,reporter,creator,priority,labels,issuetype,created,updated,due,sprint,description")
+    if [[ $HAVE_JQ == 1 ]]; then
+      jq -r '
         .fields as $f
         | "KEY:      \(.key)\n"
         + "SUMMARY:  \($f.summary)\n"
@@ -180,7 +282,10 @@ case "$cmd" in
         + "DUE:      \($f.due // "n/a")\n"
         + "LABELS:   \((($f.labels // []) | join(", ")) | if . == "" then "none" else . end)\n"
         + "UPDATED:  \(.fields.updated)\n\n"
-        + ($f.description // "(no description)" | gsub("\r"; "") | .[0:4000])'
+        + ($f.description // "(no description)" | gsub("\r"; "") | .[0:4000])' <<<"$json"
+    else
+      pretty <<<"$json"
+    fi
     ;;
   *)
     usage
