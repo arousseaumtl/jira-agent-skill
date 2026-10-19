@@ -7,6 +7,11 @@
 #          calling agent can parse.
 set -euo pipefail
 
+command -v curl >/dev/null 2>&1 || {
+  echo "error: curl is a hard dependency — install it and retry" >&2
+  exit 1
+}
+
 usage() {
   cat <<'EOF'
 Usage: jira.sh <command> [args]
@@ -27,7 +32,7 @@ Usage: jira.sh <command> [args]
     columns <BOARD_ID>                Board column layout, left->right, with status names
     sprints <BOARD_ID>                Sprints (active first, then closed)
     sprint <SPRINT_ID>                Sprint details
-    issues <SPRINT_ID> [--limit N]    Issues in a sprint
+    issues <SPRINT_ID> [--limit N]    Issues in a sprint (all pages; --limit caps total)
     search "<JQL>" [--limit N]        JQL search, first page (API caps at 100)
     count "<JQL>"                     Total matches, fully paginated (no total field in API)
     users "<name>"                    Resolve display name/email to accountId
@@ -39,10 +44,11 @@ JSON. `api` always outputs the raw response JSON (pretty-printed if jq exists).
 
 Env (never hardcode, never echo): JIRA_DOMAIN (Cloud subdomain like
 `acme`, or a self-hosted host like `jira.example.com` — the script
-auto-detects), JIRA_EMAIL, JIRA_TOKEN; JIRA_ALLOW_WRITES=1 enables api
-mutations. Resolved from environment, then
-./.env, then ~/.env; JIRA_API_TOKEN aliases JIRA_TOKEN. See references/api.md
-for the endpoint map.
+auto-detects), JIRA_EMAIL (your username on self-hosted), JIRA_TOKEN;
+JIRA_ALLOW_WRITES=1 enables api mutations; JIRA_INSECURE=1 accepts
+self-signed TLS certs (some self-hosted deployments). Resolved from
+environment, then ./.env, then ~/.env; JIRA_API_TOKEN aliases JIRA_TOKEN.
+See references/api.md for the endpoint map.
 EOF
   exit "${1:-1}"
 }
@@ -54,15 +60,25 @@ export JIRA_TOKEN="${JIRA_TOKEN:-${JIRA_API_TOKEN:-}}"
 # (wherever pi was launched), then in $HOME. Only JIRA_* keys are read and
 # existing environment values always win. Lines are parsed, never sourced.
 _env_load() {
-  local file="$1" line key val
+  local file="$1" line key val quoted
   [[ -f "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(JIRA_DOMAIN|JIRA_EMAIL|JIRA_TOKEN|JIRA_API_TOKEN|JIRA_ALLOW_WRITES)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(JIRA_DOMAIN|JIRA_EMAIL|JIRA_TOKEN|JIRA_API_TOKEN|JIRA_ALLOW_WRITES|JIRA_INSECURE)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
       key="${BASH_REMATCH[2]}"
       val="${BASH_REMATCH[3]}"
       # strip one pair of surrounding quotes, if present
-      if [[ "$val" == \"*\" && ${#val} -ge 2 ]]; then val="${val#\"}"; val="${val%\"}"; fi
-      if [[ "$val" == \'*\' && ${#val} -ge 2 ]]; then val="${val#\'}"; val="${val%\'}"; fi
+      quoted=0
+      if [[ "$val" == \"*\" && ${#val} -ge 2 ]]; then val="${val#\"}"; val="${val%\"}"; quoted=1; fi
+      if [[ "$val" == \'*\' && ${#val} -ge 2 ]]; then val="${val#\'}"; val="${val%\'}"; quoted=1; fi
+      if [[ $quoted -eq 0 ]]; then
+        # unquoted: drop an inline comment (whitespace + '#') and trailing
+        # padding, so README-style example lines work verbatim. A '#' with no
+        # preceding whitespace stays (tokens may contain #).
+        if [[ "$val" =~ ^(.*[^[:space:]])[[:space:]]+# ]]; then
+          val="${BASH_REMATCH[1]}"
+        fi
+        val="${val%"${val##*[![:space:]]}"}"
+      fi
       [[ "$key" == "JIRA_API_TOKEN" ]] && key="JIRA_TOKEN"
       [[ -n "${!key:-}" ]] || export "$key=$val"
     fi
@@ -97,8 +113,6 @@ case "$domain" in
   *.*|*:*|*/*)     BASE="https://$domain" ;;   # has dot/port/path: self-hosted
   *)               BASE="https://${domain}.atlassian.net" ;;  # bare subdomain: Cloud
 esac
-AUTH="-u ${JIRA_EMAIL}:${JIRA_TOKEN}"
-
 HAVE_JQ=0; command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 HAVE_PY=0; command -v python3 >/dev/null 2>&1 && HAVE_PY=1
 
@@ -111,19 +125,22 @@ api() { # api <method> <path> [json-body]
   # limit) is retried twice with backoff; other non-2xx fails fast with the body.
   local method="$1" path="$2" body="${3:-}"
   [[ "$path" == /* ]] || path="/$path"
+  method="$(printf '%s' "$method" | tr '[a-z]' '[A-Z]')"
   # Write operations (POST/PUT/PATCH/DELETE) are off by default so unattended
-  # runs stay read-only. Set JIRA_ALLOW_WRITES=1 to enable mutations.
+  # runs stay read-only. Set JIRA_ALLOW_WRITES=1 (or true) to enable mutations.
   case "$method" in
     GET|HEAD|OPTIONS) ;;
     *)
-      if [[ -z "${JIRA_ALLOW_WRITES:-}" ]]; then
+      if [[ "${JIRA_ALLOW_WRITES:-}" != "1" && "${JIRA_ALLOW_WRITES:-}" != "true" ]]; then
         echo "error: ${method} is a write operation and is disabled by default" >&2
         echo "set JIRA_ALLOW_WRITES=1 to enable mutations (see README, Configure)" >&2
         return 3
       fi ;;
   esac
-  local args=(-sS "${CURL_FAIL[@]}" --connect-timeout 10 --max-time 120 -X "$method" $AUTH -w $'\n%{http_code}')
-  [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" --data "$body")
+  local args=(-sS "${CURL_FAIL[@]}" --connect-timeout 10 --max-time 120 -X "$method" -u "${JIRA_EMAIL}:${JIRA_TOKEN}" -w $'\n%{http_code}')
+  case "${JIRA_INSECURE:-}" in 1|true) args+=(-k) ;; esac
+  case "$method" in GET|HEAD|OPTIONS) args+=(-L --max-redirs 5) ;; esac
+  [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" --data-raw "$body")
   local out rc=0 code attempt=1
   while :; do
     out=$(curl "${args[@]}" "$BASE$path" 2>&1) || rc=$?
@@ -137,10 +154,18 @@ api() { # api <method> <path> [json-body]
       continue
     fi
     if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
-      printf '%s\n' "$out"
+      if [[ -n "$out" ]]; then
+        printf '%s\n' "$out"
+      else
+        echo "HTTP $code"   # empty success body (e.g. 204) — explicit confirmation
+      fi
       return 0
     fi
-    echo "error: HTTP ${code:-curl-$rc} for ${method} ${path}" >&2
+    if [[ "$code" == "000" ]]; then
+      echo "error: could not reach ${BASE} (curl rc=${rc}) — check JIRA_DOMAIN, network/DNS, and TLS (self-signed cert? set JIRA_INSECURE=1)" >&2
+    else
+      echo "error: HTTP ${code:-?} for ${method} ${path}" >&2
+    fi
     [[ -n "$out" ]] && printf '%s\n' "$out" >&2
     [[ "$code" == "429" ]] && echo "hint: Jira rate limit still active; wait a moment and retry" >&2
     return 22
@@ -159,6 +184,10 @@ urlencode() {
   if [[ $HAVE_PY == 1 ]]; then
     python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"
   else
+    # byte-wise iteration (C locale) so multi-byte UTF-8 encodes to correct
+    # %XX sequences. urlencode is always invoked in a subshell, so the locale
+    # change is confined to it.
+    LC_ALL=C
     local s="$1" out="" c i hex
     for ((i=0; i<${#s}; i++)); do
       c="${s:i:1}"
@@ -178,17 +207,21 @@ json_str() { # json_str <key> <json>
   sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' <<<"$2" | head -n1
 }
 
-# Count top-level issues in a /search/jql response without jq/python.
-# Each issue object starts with {"id":" (string id); Jira field objects
-# (status, priority, ...) use numeric ids, so they never match.
+# Count issues in a response without jq/python. Counts top-level "key":"..."
+# (issue keys): quotes inside JSON string values are always escaped, and
+# field objects never match (priority carries a string id, which would fake
+# an "id":" count).
 issue_count() {
-  grep -o '"id":"' <<<"$1" | wc -l | tr -d ' '
+  grep -o '"key":"' <<<"$1" | wc -l | tr -d ' '
 }
 
 fmt_issues() {
   if [[ $HAVE_JQ == 1 ]]; then
-    # api/2 returns strings, api/3 returns objects — handle both
-    jq -r '.issues[]? | [
+    # accepts {issues: [...]} or a bare array (the issues slicer emits the
+    # latter); api/2 returns strings, api/3 returns objects — handle both.
+    # Note: `.issues // .` is NOT safe on arrays (indexing an array with a
+    # string errors before // applies), so branch on type explicitly.
+    jq -r '(if type == "object" then (.issues // []) else . end)[]? | [
       .key,
       (.fields.status.name // .fields.status // "unknown"),
       (.fields.assignee.displayName // .fields.assignee // "unassigned"),
@@ -208,7 +241,11 @@ case "$cmd" in
     path="${1:-}"; [[ -n "$path" ]] || usage
     shift || true
     body="${1:-}"
-    api "$method" "$path" "$body" | pretty
+    resp=$(api "$method" "$path" "$body") || exit $?   # propagate gate/failure rc
+    case "$resp" in
+      "HTTP "[0-9]*) printf '%s\n' "$resp" ;;   # empty-body marker (e.g. 204)
+      *)             printf '%s\n' "$resp" | pretty ;;
+    esac
     ;;
   myself)
     api GET /rest/api/3/myself | pretty
@@ -273,7 +310,7 @@ case "$cmd" in
         echo "(no closed sprints)"
       fi
     else
-      echo "active/future + closed sprints:"
+      echo "sprints (first page, raw JSON):"
       pretty <<<"$json"
     fi
     ;;
@@ -287,7 +324,6 @@ case "$cmd" in
     fi
     ;;
   issues)
-    shift
     sprint_id=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -297,8 +333,27 @@ case "$cmd" in
     done
     check_limit "$limit"
     [[ -n "$sprint_id" ]] || usage
-    mr="${limit:-50}"
-    api GET "/rest/agile/1.0/sprint/$sprint_id/issue?maxResults=$mr" | fmt_issues
+    # The Agile API caps at 50 issues per page — paginate so large sprints are
+    # not silently truncated; --limit caps the total (default: all of them).
+    startAt=0; shown=0
+    while :; do
+      json=$(api GET "/rest/agile/1.0/sprint/$sprint_id/issue?maxResults=50&startAt=$startAt")
+      if [[ $HAVE_JQ == 1 ]]; then
+        n=$(jq '.issues | length' <<<"$json")
+        take=$n
+        if [[ -n "$limit" ]]; then
+          rem=$((limit - shown))
+          (( take > rem )) && take=$rem
+        fi
+        jq -c --argjson t "$take" '.issues[:$t]' <<<"$json" | fmt_issues
+      else
+        n=$(issue_count "$json")
+        pretty <<<"$json"
+      fi
+      shown=$((shown + n))
+      startAt=$((startAt + n))
+      { [[ -n "$limit" && $shown -ge $limit ]] || [[ $n -lt 50 ]]; } && break
+    done
     ;;
   search)
     jql="${1:-}"; shift || true
@@ -311,16 +366,18 @@ case "$cmd" in
     check_limit "$limit"
     [[ -n "$jql" ]] || usage
     mr="${limit:-50}"
+    (( mr > 100 )) && mr=100   # server-side page cap
     encoded=$(urlencode "$jql")
     api GET "/rest/api/3/search/jql?jql=${encoded}&maxResults=${mr}&fields=summary,status,assignee,priority,labels" | fmt_issues
     ;;
   count)
-    jql="$1"; shift || true
+    jql="${1:-}"; shift || true
     [[ -n "$jql" ]] || usage
     encoded=$(urlencode "$jql")
     total=0; next=""
     while :; do
-      url="/rest/api/3/search/jql?jql=${encoded}&maxResults=100"
+      # fields=key keeps payloads minimal (the endpoint returns ids only by default)
+      url="/rest/api/3/search/jql?jql=${encoded}&maxResults=100&fields=key"
       if [[ -n "$next" ]]; then
         url="${url}&nextPageToken=${next}"
       fi

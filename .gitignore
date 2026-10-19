@@ -6,3 +6,6 @@
 # Editor/OS noise
 .DS_Store
 *.swp
+
+# Local agent state (pi task outputs, session data)
+.pi/

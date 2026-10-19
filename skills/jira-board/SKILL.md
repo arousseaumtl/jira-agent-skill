@@ -18,8 +18,9 @@ The script reads three variables (never hardcode credentials, never echo them):
 | Variable | Meaning | Example |
 |---|---|---|
 | `JIRA_DOMAIN` | Atlassian subdomain (`acme`) or self-hosted Jira host (`jira.example.com`) — auto-detected | `acme` |
-| `JIRA_EMAIL` | Jira account email | `dev@acme.com` |
+| `JIRA_EMAIL` | Jira account email (Cloud) or username (self-hosted) | `dev@acme.com` |
 | `JIRA_TOKEN` | API token (create at id.atlassian.com → Security) | `***` |
+| `JIRA_INSECURE` | optional — `1` accepts self-signed TLS certs (some self-hosted) | `1` |
 
 Resolution order for each variable: process environment → `.env` in the current working directory → `~/.env` (only `JIRA_*` keys are parsed from `.env` files, never sourced). If the script still can't find them it exits with the exact variables to set — relay that message to the user. Never ask them to paste the token into chat.
 
@@ -31,7 +32,7 @@ Resolution order for each variable: process environment → `.env` in the curren
 - `columns <BOARD_ID>` — board column layout, left→right, with the status names in each column. This is the ONLY way to see a board's columns: the legacy `GET /rest/agile/1.0/board/{id}/column` endpoint is **404 (retired)** — column layout now comes from `GET /rest/agile/1.0/board/{id}/configuration` → `.columnConfig.columns`. Simple boards with a null location have no configuration and exit 2 with a hint.
 - `sprints <BOARD_ID>` — sprints on the board: active ones first, then closed (for scrum boards).
 - `sprint <SPRINT_ID>` — sprint name, state, dates, goal.
-- `issues <SPRINT_ID>` — all issues in a sprint: key, summary, status, assignee, priority.
+- `issues <SPRINT_ID> [--limit N]` — all issues in a sprint (paginates automatically past the Agile 50/page cap; `--limit N` caps the total): key, summary, status, assignee, priority.
 - `search "<JQL>"` — arbitrary JQL search, first page (max 100), e.g. `search "project = PROJ AND sprint in openSprints()"`.
 - `count "<JQL>"` — exact total of all matches, fully paginated. Use for "how many all-time" questions; `search --limit` can never see past page 1.
 - `users "<name>"` — resolve a display name or email to an accountId. JQL `assignee = "<accountId>"` needs the ID; internal accounts look like `123456:uuid`, guest/external accounts carry a `qm:` prefix (count them separately).
@@ -72,4 +73,5 @@ The curated commands are read-only. `api` can `POST`/`PUT`/`DELETE` — creating
 - A project existing only through issue keys (found via a global `search "assignee is EMPTY"` or ticket prefix) is normal — the issue keys are ground truth.
 - Errors print to stderr with the Jira status code — a 401 means bad credentials, 403 means the account lacks board access, 404 usually means a wrong ID (re-run `boards` to resolve).
 - Hard dependencies: `bash` + `curl`. `jq` (pretty output/TSV) and `python3` (URL encoding) are optional — without them the script works identically and emits raw JSON.
+- Self-hosted: `JIRA_EMAIL` is the username; `JIRA_INSECURE=1` accepts self-signed TLS certs. A `000`/connection error with a good domain usually means TLS — try `JIRA_INSECURE=1`.
 - This skill is read-only by default (curated commands); `api` is the explicit mutation path — see the Mutations section.

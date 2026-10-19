@@ -51,10 +51,11 @@ JIRA_TOKEN=***                # API token (id.atlassian.com -> Security)
 
 Notes:
 
-- `.env` files are parsed line-by-line for `JIRA_*` keys only — never sourced — and any value already in your environment wins.
+- `.env` files are parsed line-by-line for `JIRA_*` keys only — never sourced — and any value already in your environment wins. Inline comments (`VALUE  # note`) and surrounding quotes are handled.
 - `JIRA_API_TOKEN` is accepted as an alias for `JIRA_TOKEN`.
 - **One variable for every deployment:** `JIRA_DOMAIN` auto-detects the format — `acme` and `acme.atlassian.net` (or a pasted Cloud URL) resolve to the Cloud site; a host with dots or a path like `jira.example.com` or `https://jira.example.com:8443/jira` is used as a self-hosted base. Self-hosted: use the full hostname, not a bare word.
 - **Writes are off by default.** `api` only allows `GET`/`HEAD`/`OPTIONS` unless you set `JIRA_ALLOW_WRITES=1`, which keeps unattended runs read-only. Even when enabled, confirm the exact action before mutating.
+- **Self-hosted notes:** put your **username** in `JIRA_EMAIL` (Cloud uses the email address), and if your Jira uses a self-signed TLS certificate set `JIRA_INSECURE=1` to skip verification.
 - `.env` is git-ignored in this repo; never commit credentials.
 
 ## Commands
@@ -68,7 +69,7 @@ bash skills/jira-board/scripts/jira.sh board <BOARD_ID>                # board d
 bash skills/jira-board/scripts/jira.sh columns <BOARD_ID>              # column layout, L->R, with status names
 bash skills/jira-board/scripts/jira.sh sprints <BOARD_ID>              # sprints (active first)
 bash skills/jira-board/scripts/jira.sh sprint <SPRINT_ID>              # sprint details
-bash skills/jira-board/scripts/jira.sh issues <SPRINT_ID> [--limit N]  # issues in a sprint
+bash skills/jira-board/scripts/jira.sh issues <SPRINT_ID> [--limit N]  # all issues in a sprint (paginated)
 bash skills/jira-board/scripts/jira.sh search "<JQL>" [--limit N]      # JQL search (first page, 100 max)
 bash skills/jira-board/scripts/jira.sh count "<JQL>"                   # exact total, fully paginated
 bash skills/jira-board/scripts/jira.sh users "<name>"                  # name/email -> accountId
@@ -87,7 +88,7 @@ bash skills/jira-board/scripts/jira.sh count 'assignee = "<accountId-from-users>
 ## Requirements
 
 - `bash`, `curl` (hard deps); `jq` and `python3` optional — without them the script emits raw JSON
-- A Jira Cloud site with an API token; `api/3` endpoints (search) plus Agile `api/1.0` (boards/sprints)
+- A Jira Cloud site (or a self-hosted Jira / Data Center instance) with an API token; `api/3` endpoints (search) plus Agile `api/1.0` (boards/sprints)
 - Curated commands never call write/mutation endpoints; only `api` can
 
 ## Files
