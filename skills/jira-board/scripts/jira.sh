@@ -18,6 +18,7 @@ Usage: jira.sh <command> [args]
       api POST /rest/api/3/issue/PROJ-123/comment '{"body":"hi"}'
       api PUT /rest/api/3/issue/PROJ-123 '{"update":{"description":["new"]}}'
       api DELETE /rest/api/3/attachment/42
+        (writes are OFF by default — set JIRA_ALLOW_WRITES=1 to enable)
     myself                            Who is the authenticated account?
 
   Curated:
@@ -36,9 +37,11 @@ Usage: jira.sh <command> [args]
 Output: tab-separated one-line-per-item when jq is installed, otherwise raw
 JSON. `api` always outputs the raw response JSON (pretty-printed if jq exists).
 
-Env (never hardcode, never echo): JIRA_DOMAIN, JIRA_EMAIL, JIRA_TOKEN
-(resolved from environment, then ./.env, then ~/.env; JIRA_API_TOKEN aliases
-JIRA_TOKEN). See references/api.md for the endpoint map.
+Env (never hardcode, never echo): JIRA_EMAIL, JIRA_TOKEN, and either
+JIRA_DOMAIN (Cloud subdomain) or JIRA_BASE_URL (self-hosted/Data Center);
+JIRA_ALLOW_WRITES=1 enables api mutations. Resolved from environment, then
+./.env, then ~/.env; JIRA_API_TOKEN aliases JIRA_TOKEN. See references/api.md
+for the endpoint map.
 EOF
   exit "${1:-1}"
 }
@@ -53,7 +56,7 @@ _env_load() {
   local file="$1" line key val
   [[ -f "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(JIRA_DOMAIN|JIRA_EMAIL|JIRA_TOKEN|JIRA_API_TOKEN)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(JIRA_DOMAIN|JIRA_BASE_URL|JIRA_EMAIL|JIRA_TOKEN|JIRA_API_TOKEN|JIRA_ALLOW_WRITES)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
       key="${BASH_REMATCH[2]}"
       val="${BASH_REMATCH[3]}"
       # strip one pair of surrounding quotes, if present
@@ -67,24 +70,38 @@ _env_load() {
 _env_load "./.env"
 _env_load "$HOME/.env"
 
-for var in JIRA_DOMAIN JIRA_EMAIL JIRA_TOKEN; do
+for var in JIRA_EMAIL JIRA_TOKEN; do
   if [[ -z "${!var:-}" ]]; then
     echo "error: $var is not set" >&2
     echo "" >&2
     echo "Set it in your environment or in a .env file in your working directory or in ~/.env, e.g.:" >&2
-    echo "  JIRA_DOMAIN=acme                # your Atlassian subdomain" >&2
+    echo "  JIRA_DOMAIN=acme                # your Atlassian subdomain (or JIRA_BASE_URL if self-hosted)" >&2
     echo "  JIRA_EMAIL=dev@acme.com         # your Jira account email" >&2
     echo "  JIRA_TOKEN=***                # API token (id.atlassian.com -> Security)" >&2
     exit 1
   fi
 done
 
-# JIRA_DOMAIN may be a bare subdomain (acme), a full host (acme.atlassian.net),
-# or even a pasted URL (https://acme.atlassian.net/) — normalize all to subdomain.
-domain="${JIRA_DOMAIN#*://}"
-domain="${domain%/}"
-domain="${domain%.atlassian.net}"
-BASE="https://${domain}.atlassian.net"
+if [[ -n "${JIRA_BASE_URL:-}" ]]; then
+  # Self-hosted / Data Center: full base URL, e.g. https://jira.corp.example.com
+  BASE="${JIRA_BASE_URL%/}"
+  [[ "$BASE" == http://* || "$BASE" == https://* ]] || BASE="https://$BASE"
+else
+  if [[ -z "${JIRA_DOMAIN:-}" ]]; then
+    echo "error: JIRA_DOMAIN is not set (use JIRA_BASE_URL for self-hosted / Data Center Jira)" >&2
+    echo "" >&2
+    echo "Set it in your environment or in a .env file in your working directory or in ~/.env, e.g.:" >&2
+    echo "  JIRA_DOMAIN=acme                # your Atlassian subdomain" >&2
+    echo "  JIRA_BASE_URL=https://jira.example.com   # self-hosted instead" >&2
+    exit 1
+  fi
+  # JIRA_DOMAIN may be a bare subdomain (acme), a full host (acme.atlassian.net),
+  # or even a pasted URL (https://acme.atlassian.net/) — normalize all to subdomain.
+  domain="${JIRA_DOMAIN#*://}"
+  domain="${domain%/}"
+  domain="${domain%.atlassian.net}"
+  BASE="https://${domain}.atlassian.net"
+fi
 AUTH="-u ${JIRA_EMAIL}:${JIRA_TOKEN}"
 
 HAVE_JQ=0; command -v jq >/dev/null 2>&1 && HAVE_JQ=1
@@ -99,6 +116,17 @@ api() { # api <method> <path> [json-body]
   # limit) is retried twice with backoff; other non-2xx fails fast with the body.
   local method="$1" path="$2" body="${3:-}"
   [[ "$path" == /* ]] || path="/$path"
+  # Write operations (POST/PUT/PATCH/DELETE) are off by default so unattended
+  # runs stay read-only. Set JIRA_ALLOW_WRITES=1 to enable mutations.
+  case "$method" in
+    GET|HEAD|OPTIONS) ;;
+    *)
+      if [[ -z "${JIRA_ALLOW_WRITES:-}" ]]; then
+        echo "error: ${method} is a write operation and is disabled by default" >&2
+        echo "set JIRA_ALLOW_WRITES=1 to enable mutations (see README, Configure)" >&2
+        return 3
+      fi ;;
+  esac
   local args=(-sS "${CURL_FAIL[@]}" --connect-timeout 10 --max-time 120 -X "$method" $AUTH -w $'\n%{http_code}')
   [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" --data "$body")
   local out rc=0 code attempt=1

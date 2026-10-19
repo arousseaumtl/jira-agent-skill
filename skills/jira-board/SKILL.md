@@ -52,7 +52,7 @@ The script prints one line per item, tab-separated **when `jq` is installed**; w
 
 ## Mutations (use `api` carefully)
 
-The curated commands are read-only. `api` can `POST`/`PUT`/`DELETE` — creating issues, running transitions, adding comments or worklogs, deleting. Before mutating: (1) confirm the exact key/action with the user, (2) prefer the smallest reversible action, (3) report what changed. Never use `api DELETE` on production data without explicit user confirmation.
+The curated commands are read-only. `api` can `POST`/`PUT`/`DELETE` — creating issues, running transitions, adding comments or worklogs, deleting — but **write methods are blocked unless the user has set `JIRA_ALLOW_WRITES=1`**. If the script reports that writes are disabled, tell the user and ask; do not retry. Before mutating: (1) confirm the exact key/action with the user, (2) prefer the smallest reversible action, (3) report what changed. Never use `api DELETE` on production data without explicit user confirmation.
 
 ## Counting "all time" (API quirks, verified 2026-07)
 

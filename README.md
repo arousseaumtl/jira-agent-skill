@@ -1,6 +1,6 @@
 # Jira Board — Pi Skill Package
 
-A [Pi](https://pi.dev) agent skill for querying Jira Cloud boards and tickets via the Agile + REST APIs. The curated commands are **read-only**; a generic `api` passthrough can reach any endpoint (including mutations) and the agent is instructed to confirm before writing.
+A [Pi](https://pi.dev) agent skill for querying Jira Cloud boards and tickets via the Agile + REST APIs. The curated commands are **read-only**. A generic `api` passthrough can reach any endpoint, but writes are **disabled by default** — they require `JIRA_ALLOW_WRITES=1`, and the agent is instructed to confirm before mutating.
 
 ## What it does
 
@@ -34,7 +34,7 @@ Then ask the agent things like "what's unassigned on the ACME board?" or `/skill
 
 ## Configure
 
-The skill needs three values. For each one, it is picked up from the first place it is found:
+The script needs credentials plus a site location. Each value is picked up from the first place it is found:
 
 1. **Your environment** (`JIRA_DOMAIN`, `JIRA_EMAIL`, `JIRA_TOKEN`)
 2. **A `.env` file in the current working directory** (wherever you launched pi)
@@ -52,6 +52,8 @@ Notes:
 
 - `.env` files are parsed line-by-line for `JIRA_*` keys only — never sourced — and any value already in your environment wins.
 - `JIRA_API_TOKEN` is accepted as an alias for `JIRA_TOKEN`.
+- **Self-hosted / Data Center:** set `JIRA_BASE_URL` (e.g. `https://jira.example.com`) instead of `JIRA_DOMAIN`; a trailing slash or missing `https://` is fine.
+- **Writes are off by default.** `api` only allows `GET`/`HEAD`/`OPTIONS` unless you set `JIRA_ALLOW_WRITES=1`, which keeps unattended runs read-only. Even when enabled, confirm the exact action before mutating.
 - `.env` is git-ignored in this repo; never commit credentials.
 
 ## Commands
