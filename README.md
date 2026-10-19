@@ -26,9 +26,8 @@ It also encodes the Jira API quirks verified against a live Cloud instance (2026
 ## Install
 
 ```bash
-pi install git:github.com/<owner>/jira-skill-extension@main
-# or from a local checkout:
-pi install ./jira-skill-extension
+pi install /path/to/JiraExtension   # from a local checkout
+pi install git:<your-repo-url>@main # if you host the repo
 ```
 
 Then ask the agent things like "what's unassigned on the ACME board?" or `/skill:jira-board`.
