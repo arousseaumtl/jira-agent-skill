@@ -40,7 +40,7 @@ Env (never hardcode, never echo): JIRA_DOMAIN, JIRA_EMAIL, JIRA_TOKEN
 (resolved from environment, then ./.env, then ~/.env; JIRA_API_TOKEN aliases
 JIRA_TOKEN). See references/api.md for the endpoint map.
 EOF
-  exit 1
+  exit "${1:-1}"
 }
 
 # Accept JIRA_API_TOKEN as an alias for JIRA_TOKEN.
@@ -79,20 +79,57 @@ for var in JIRA_DOMAIN JIRA_EMAIL JIRA_TOKEN; do
   fi
 done
 
-# Allow JIRA_DOMAIN to be a bare subdomain (acme) or full host (acme.atlassian.net).
-domain="${JIRA_DOMAIN%.atlassian.net}"
+# JIRA_DOMAIN may be a bare subdomain (acme), a full host (acme.atlassian.net),
+# or even a pasted URL (https://acme.atlassian.net/) — normalize all to subdomain.
+domain="${JIRA_DOMAIN#*://}"
+domain="${domain%/}"
+domain="${domain%.atlassian.net}"
 BASE="https://${domain}.atlassian.net"
 AUTH="-u ${JIRA_EMAIL}:${JIRA_TOKEN}"
 
 HAVE_JQ=0; command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 HAVE_PY=0; command -v python3 >/dev/null 2>&1 && HAVE_PY=1
 
+# --fail-with-body only exists in curl >= 8.4; older releases fall back to -f.
+CURL_FAIL=(--fail-with-body)
+curl --help all 2>/dev/null | grep -q -- '--fail-with-body' || CURL_FAIL=(-f)
+
 api() { # api <method> <path> [json-body]
+  # Timeouts so a hung connection cannot hang the script; HTTP 429 (Jira rate
+  # limit) is retried twice with backoff; other non-2xx fails fast with the body.
   local method="$1" path="$2" body="${3:-}"
   [[ "$path" == /* ]] || path="/$path"
-  local args=(-sS --fail-with-body -X "$method" $AUTH)
+  local args=(-sS "${CURL_FAIL[@]}" --connect-timeout 10 --max-time 120 -X "$method" $AUTH -w $'\n%{http_code}')
   [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" --data "$body")
-  curl "${args[@]}" "$BASE$path"
+  local out rc=0 code attempt=1
+  while :; do
+    out=$(curl "${args[@]}" "$BASE$path" 2>&1) || rc=$?
+    code="${out##*$'\n'}"          # http code appended via -w
+    out="${out%$'\n'*}"            # body, minus the code line
+    if [[ "$code" == "429" && $attempt -lt 3 ]]; then
+      local wait_s=$((attempt * 5))
+      echo "warning: Jira rate limit (HTTP 429); retry ${attempt}/2 in ${wait_s}s" >&2
+      sleep "$wait_s"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    echo "error: HTTP ${code:-curl-$rc} for ${method} ${path}" >&2
+    [[ -n "$out" ]] && printf '%s\n' "$out" >&2
+    [[ "$code" == "429" ]] && echo "hint: Jira rate limit still active; wait a moment and retry" >&2
+    return 22
+  done
+}
+
+require_arg() { # require_arg <value> <what>
+  [[ -n "$1" ]] || { echo "error: missing $2 (see: jira.sh help)" >&2; exit 1; }
+}
+
+check_limit() { # check_limit <limit>
+  [[ -z "$1" || "$1" =~ ^[1-9][0-9]*$ ]] || { echo "error: --limit expects a positive integer (got: $1)" >&2; exit 1; }
 }
 
 urlencode() {
@@ -157,13 +194,18 @@ case "$cmd" in
     path="/rest/agile/1.0/board?maxResults=50"
     if [[ -n "${1:-}" ]]; then path="/rest/agile/1.0/board?projectKey=$1&maxResults=50"; fi
     # list endpoint omits project; `board <id>` shows it
+    json=$(api GET "$path")
     if [[ $HAVE_JQ == 1 ]]; then
-      api GET "$path" | jq -r '.values[]? | [.id, .name, .type] | @tsv'
+      if [[ $(jq '.values | length' <<<"$json") -ge 50 ]]; then
+        echo "warning: 50-board page limit reached; list may be truncated" >&2
+      fi
+      jq -r '.values[]? | [.id, .name, .type] | @tsv' <<<"$json"
     else
-      api GET "$path" | pretty
+      pretty <<<"$json"
     fi
     ;;
   board)
+    require_arg "${1:-}" "board id"
     json=$(api GET "/rest/agile/1.0/board/$1")
     if [[ $HAVE_JQ == 1 ]]; then
       jq -r '. as $b | [$b.id, $b.name, $b.type, ($b.location.projectKey // "")] | @tsv' <<<"$json"
@@ -175,6 +217,7 @@ case "$cmd" in
     # Column layout comes from /configuration (columnConfig.columns, ordered L->R).
     # The legacy GET /rest/agile/1.0/board/{id}/column is 404 (retired) — do not use it.
     # columnConfig statuses carry only {id,self}; map ids to names via /rest/api/3/status.
+    require_arg "${1:-}" "board id"
     if ! cfg=$(api GET "/rest/agile/1.0/board/$1/configuration" 2>/dev/null); then
       echo "error: no column configuration for board $1 (simple board with a null location?) — run: jira.sh board $1" >&2
       exit 2
@@ -193,6 +236,7 @@ case "$cmd" in
     fi
     ;;
   sprints)
+    require_arg "${1:-}" "board id"
     if ! json=$(api GET "/rest/agile/1.0/board/$1/sprint?maxResults=50" 2>&1); then
       echo "error: board does not support sprints (kanban/simple board) — use: jira.sh search \"project = <KEY> AND statusCategory != Done\"" >&2
       exit 2
@@ -211,6 +255,7 @@ case "$cmd" in
     fi
     ;;
   sprint)
+    require_arg "${1:-}" "sprint id"
     json=$(api GET "/rest/agile/1.0/sprint/$1")
     if [[ $HAVE_JQ == 1 ]]; then
       jq -r '. as $s | [$s.id, $s.name, $s.state, $s.startDate, $s.endDate, ($s.goal // "")] | @tsv' <<<"$json"
@@ -223,22 +268,24 @@ case "$cmd" in
     sprint_id=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
-        --limit) limit="$2"; shift 2 ;;
+        --limit) [[ $# -ge 2 ]] || { echo "error: --limit needs a value" >&2; exit 1; }; limit="$2"; shift 2 ;;
         *) sprint_id="$1"; shift ;;
       esac
     done
+    check_limit "$limit"
     [[ -n "$sprint_id" ]] || usage
     mr="${limit:-50}"
     api GET "/rest/agile/1.0/sprint/$sprint_id/issue?maxResults=$mr" | fmt_issues
     ;;
   search)
-    jql="$1"; shift || true
+    jql="${1:-}"; shift || true
     while [[ $# -gt 0 ]]; do
       case "$1" in
-        --limit) limit="$2"; shift 2 ;;
+        --limit) [[ $# -ge 2 ]] || { echo "error: --limit needs a value" >&2; exit 1; }; limit="$2"; shift 2 ;;
         *) shift ;;
       esac
     done
+    check_limit "$limit"
     [[ -n "$jql" ]] || usage
     mr="${limit:-50}"
     encoded=$(urlencode "$jql")
@@ -272,11 +319,14 @@ case "$cmd" in
     echo "$total"
     ;;
   users)
-    q="$1"; shift || true
-    [[ -n "$q" ]] || usage
+    q="${1:-}"; shift || true
+    require_arg "$q" "user name or email"
     encoded=$(urlencode "$q")
     json=$(api GET "/rest/api/3/user/search?query=${encoded}&maxResults=20")
     if [[ $HAVE_JQ == 1 ]]; then
+      if [[ $(jq 'length' <<<"$json") -ge 20 ]]; then
+        echo "warning: 20-result page limit reached; more matches may exist" >&2
+      fi
       jq -r '.[] | [.accountId, .displayName, (.emailAddress // "")] | @tsv' <<<"$json"
     else
       pretty <<<"$json"
@@ -285,12 +335,16 @@ case "$cmd" in
   projects)
     json=$(api GET "/rest/api/3/project?maxResults=100")
     if [[ $HAVE_JQ == 1 ]]; then
+      if [[ $(jq 'length' <<<"$json") -ge 100 ]]; then
+        echo "warning: 100-project page limit reached; list may be truncated" >&2
+      fi
       jq -r '.[] | select(.projectTypeKey=="software") | [.key, .name, (.projectLead.displayName // "")] | @tsv' <<<"$json"
     else
       pretty <<<"$json"
     fi
     ;;
   issue)
+    require_arg "${1:-}" "issue key"
     json=$(api GET "/rest/api/2/issue/$1?fields=summary,status,assignee,reporter,creator,priority,labels,issuetype,created,updated,due,sprint,description")
     if [[ $HAVE_JQ == 1 ]]; then
       jq -r '
@@ -308,6 +362,9 @@ case "$cmd" in
     else
       pretty <<<"$json"
     fi
+    ;;
+  help|-h|--help)
+    usage 0
     ;;
   *)
     usage
