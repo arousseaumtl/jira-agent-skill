@@ -17,7 +17,7 @@ The script reads three variables (never hardcode credentials, never echo them):
 
 | Variable | Meaning | Example |
 |---|---|---|
-| `JIRA_DOMAIN` | Your Atlassian subdomain | `acme` |
+| `JIRA_DOMAIN` | Atlassian subdomain (`acme`) or self-hosted Jira host (`jira.example.com`) — auto-detected | `acme` |
 | `JIRA_EMAIL` | Jira account email | `dev@acme.com` |
 | `JIRA_TOKEN` | API token (create at id.atlassian.com → Security) | `***` |
 

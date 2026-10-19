@@ -37,9 +37,10 @@ Usage: jira.sh <command> [args]
 Output: tab-separated one-line-per-item when jq is installed, otherwise raw
 JSON. `api` always outputs the raw response JSON (pretty-printed if jq exists).
 
-Env (never hardcode, never echo): JIRA_EMAIL, JIRA_TOKEN, and either
-JIRA_DOMAIN (Cloud subdomain) or JIRA_BASE_URL (self-hosted/Data Center);
-JIRA_ALLOW_WRITES=1 enables api mutations. Resolved from environment, then
+Env (never hardcode, never echo): JIRA_DOMAIN (Cloud subdomain like
+`acme`, or a self-hosted host like `jira.example.com` — the script
+auto-detects), JIRA_EMAIL, JIRA_TOKEN; JIRA_ALLOW_WRITES=1 enables api
+mutations. Resolved from environment, then
 ./.env, then ~/.env; JIRA_API_TOKEN aliases JIRA_TOKEN. See references/api.md
 for the endpoint map.
 EOF
@@ -56,7 +57,7 @@ _env_load() {
   local file="$1" line key val
   [[ -f "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(JIRA_DOMAIN|JIRA_BASE_URL|JIRA_EMAIL|JIRA_TOKEN|JIRA_API_TOKEN|JIRA_ALLOW_WRITES)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(JIRA_DOMAIN|JIRA_EMAIL|JIRA_TOKEN|JIRA_API_TOKEN|JIRA_ALLOW_WRITES)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
       key="${BASH_REMATCH[2]}"
       val="${BASH_REMATCH[3]}"
       # strip one pair of surrounding quotes, if present
@@ -70,38 +71,32 @@ _env_load() {
 _env_load "./.env"
 _env_load "$HOME/.env"
 
-for var in JIRA_EMAIL JIRA_TOKEN; do
+for var in JIRA_DOMAIN JIRA_EMAIL JIRA_TOKEN; do
   if [[ -z "${!var:-}" ]]; then
     echo "error: $var is not set" >&2
     echo "" >&2
     echo "Set it in your environment or in a .env file in your working directory or in ~/.env, e.g.:" >&2
-    echo "  JIRA_DOMAIN=acme                # your Atlassian subdomain (or JIRA_BASE_URL if self-hosted)" >&2
+    echo "  JIRA_DOMAIN=acme                # your Atlassian subdomain (Cloud)" >&2
+    echo "  JIRA_DOMAIN=jira.example.com    # ...or your self-hosted Jira host" >&2
     echo "  JIRA_EMAIL=dev@acme.com         # your Jira account email" >&2
     echo "  JIRA_TOKEN=***                # API token (id.atlassian.com -> Security)" >&2
     exit 1
   fi
 done
 
-if [[ -n "${JIRA_BASE_URL:-}" ]]; then
-  # Self-hosted / Data Center: full base URL, e.g. https://jira.corp.example.com
-  BASE="${JIRA_BASE_URL%/}"
-  [[ "$BASE" == http://* || "$BASE" == https://* ]] || BASE="https://$BASE"
-else
-  if [[ -z "${JIRA_DOMAIN:-}" ]]; then
-    echo "error: JIRA_DOMAIN is not set (use JIRA_BASE_URL for self-hosted / Data Center Jira)" >&2
-    echo "" >&2
-    echo "Set it in your environment or in a .env file in your working directory or in ~/.env, e.g.:" >&2
-    echo "  JIRA_DOMAIN=acme                # your Atlassian subdomain" >&2
-    echo "  JIRA_BASE_URL=https://jira.example.com   # self-hosted instead" >&2
-    exit 1
-  fi
-  # JIRA_DOMAIN may be a bare subdomain (acme), a full host (acme.atlassian.net),
-  # or even a pasted URL (https://acme.atlassian.net/) — normalize all to subdomain.
-  domain="${JIRA_DOMAIN#*://}"
-  domain="${domain%/}"
-  domain="${domain%.atlassian.net}"
-  BASE="https://${domain}.atlassian.net"
-fi
+# JIRA_DOMAIN accepts one variable for every deployment; the format is detected:
+#   acme                      Cloud subdomain      -> https://acme.atlassian.net
+#   acme.atlassian.net        full Cloud host      -> https://acme.atlassian.net
+#   https://acme.atlassian.net/   pasted URL       -> https://acme.atlassian.net
+#   jira.example.com          self-hosted host     -> https://jira.example.com
+#   https://jira.example.com:8443/jira  self-hosted URL -> used as-is
+domain="${JIRA_DOMAIN#*://}"
+domain="${domain%/}"
+case "$domain" in
+  *.atlassian.net) BASE="https://${domain%.atlassian.net}.atlassian.net" ;;
+  *.*|*:*|*/*)     BASE="https://$domain" ;;   # has dot/port/path: self-hosted
+  *)               BASE="https://${domain}.atlassian.net" ;;  # bare subdomain: Cloud
+esac
 AUTH="-u ${JIRA_EMAIL}:${JIRA_TOKEN}"
 
 HAVE_JQ=0; command -v jq >/dev/null 2>&1 && HAVE_JQ=1

@@ -43,7 +43,8 @@ The script needs credentials plus a site location. Each value is picked up from 
 If none of them provide a value, the script stops and prints the exact variables to set, e.g.:
 
 ```text
-JIRA_DOMAIN=acme                # your Atlassian subdomain
+JIRA_DOMAIN=acme                # your Atlassian subdomain (Cloud)
+# JIRA_DOMAIN=jira.example.com    # ...or your self-hosted / Data Center host
 JIRA_EMAIL=dev@acme.com         # your Jira account email
 JIRA_TOKEN=***                # API token (id.atlassian.com -> Security)
 ```
@@ -52,7 +53,7 @@ Notes:
 
 - `.env` files are parsed line-by-line for `JIRA_*` keys only — never sourced — and any value already in your environment wins.
 - `JIRA_API_TOKEN` is accepted as an alias for `JIRA_TOKEN`.
-- **Self-hosted / Data Center:** set `JIRA_BASE_URL` (e.g. `https://jira.example.com`) instead of `JIRA_DOMAIN`; a trailing slash or missing `https://` is fine.
+- **One variable for every deployment:** `JIRA_DOMAIN` auto-detects the format — `acme` and `acme.atlassian.net` (or a pasted Cloud URL) resolve to the Cloud site; a host with dots or a path like `jira.example.com` or `https://jira.example.com:8443/jira` is used as a self-hosted base. Self-hosted: use the full hostname, not a bare word.
 - **Writes are off by default.** `api` only allows `GET`/`HEAD`/`OPTIONS` unless you set `JIRA_ALLOW_WRITES=1`, which keeps unattended runs read-only. Even when enabled, confirm the exact action before mutating.
 - `.env` is git-ignored in this repo; never commit credentials.
 
