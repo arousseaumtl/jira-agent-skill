@@ -28,6 +28,7 @@ Resolution order for each variable: process environment → `.env` in the curren
 - `boards [PROJECT_KEY]` — list boards, optionally for one project. This is the usual first step when the user names a board by name: find its numeric ID here.
 - `projects` — list software projects (key, name, lead). Use this when a board's project key can't be resolved (some boards report a null location) and you need the key for JQL.
 - `board <BOARD_ID>` — board name, type (scrum/kanban), project, location.
+- `columns <BOARD_ID>` — board column layout, left→right, with the status names in each column. This is the ONLY way to see a board's columns: the legacy `GET /rest/agile/1.0/board/{id}/column` endpoint is **404 (retired)** — column layout now comes from `GET /rest/agile/1.0/board/{id}/configuration` → `.columnConfig.columns`. Simple boards with a null location have no configuration and exit 2 with a hint.
 - `sprints <BOARD_ID>` — sprints on the board: active ones first, then closed (for scrum boards).
 - `sprint <SPRINT_ID>` — sprint name, state, dates, goal.
 - `issues <SPRINT_ID>` — all issues in a sprint: key, summary, status, assignee, priority.
@@ -59,6 +60,9 @@ The curated commands are read-only. `api` can `POST`/`PUT`/`DELETE` — creating
 - `search/jql` honors a `fields=` param, but only with **bare field names** (`project,status`). Dotted names (`project.key`) silently return issues with an empty fields block.
 - Example: "how many tickets has X completed?" → `users "X"` → `count "assignee = \"<accountId>\" AND statusCategory = Done"` → then per-project `count`s to break it down.
 - **Comment creation** via the passthrough: `api POST /rest/api/2/issue/{key}/comment '{"body":"..."}'` is the verified shape; the api/3 comment endpoint rejected both `body` and `comment` field names on the test tenant (2026-07).
+- **Board column layout** is only available via `GET /rest/agile/1.0/board/{id}/configuration` → `.columnConfig.columns` (ordered left→right; each column lists status `{id,self}`). The old `GET /rest/agile/1.0/board/{id}/column` is 404. The `columns` command wraps this and maps status ids to names via `/rest/api/3/status`.
+- **Board order / card rank is not retrievable via REST.** The `rank` field comes back `null` from `/rest/api/3/search/jql`, and there is no per-column card-listing endpoint for kanban. You can map a ticket's status to its column (via `columns`), but NOT recover the exact top-to-bottom order of cards inside a column. Sort by Priority and status stage instead.
+- **A project can have no board of its own** (e.g. a support/IT project may surface only through issue keys). Don't assume "the <PROJECT> board" exists — confirm with `boards` + `board <ID>`.
 
 ## Notes
 

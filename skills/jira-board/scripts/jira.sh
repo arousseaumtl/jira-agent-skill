@@ -23,6 +23,7 @@ Usage: jira.sh <command> [args]
   Curated:
     boards [PROJECT_KEY]              List boards (optionally for one project)
     board <BOARD_ID>                  Board details
+    columns <BOARD_ID>                Board column layout, left->right, with status names
     sprints <BOARD_ID>                Sprints (active first, then closed)
     sprint <SPRINT_ID>                Sprint details
     issues <SPRINT_ID> [--limit N]    Issues in a sprint
@@ -168,6 +169,27 @@ case "$cmd" in
       jq -r '. as $b | [$b.id, $b.name, $b.type, ($b.location.projectKey // "")] | @tsv' <<<"$json"
     else
       pretty <<<"$json"
+    fi
+    ;;
+  columns)
+    # Column layout comes from /configuration (columnConfig.columns, ordered L->R).
+    # The legacy GET /rest/agile/1.0/board/{id}/column is 404 (retired) — do not use it.
+    # columnConfig statuses carry only {id,self}; map ids to names via /rest/api/3/status.
+    if ! cfg=$(api GET "/rest/agile/1.0/board/$1/configuration" 2>/dev/null); then
+      echo "error: no column configuration for board $1 (simple board with a null location?) — run: jira.sh board $1" >&2
+      exit 2
+    fi
+    if [[ $HAVE_JQ == 1 ]]; then
+      smap=$(api GET "/rest/api/3/status?maxResults=1000" \
+        | jq -c '[to_entries[] | {key:(.value.id|tostring), value:.value.name}] | from_entries')
+      jq -r --argjson smap "$smap" '
+        ( (.columnConfig.columns // []) | to_entries[] )
+        | .key as $i | .value as $c
+        | (($i+1)|tostring) + ". " + $c.name + "  ::  "
+          + ( [ $c.statuses[]? | ($smap[(.id|tostring)] // ((.id|tostring))) ] | join(", ") )
+      ' <<<"$cfg"
+    else
+      pretty <<<"$cfg"
     fi
     ;;
   sprints)
