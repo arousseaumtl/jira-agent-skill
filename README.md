@@ -1,16 +1,19 @@
 # Jira Board — Pi Skill Package
 
-A [Pi](https://pi.dev) agent skill for querying Jira Cloud boards and tickets via the Agile + REST APIs. **Read-only** — no commands create or mutate issues.
+A [Pi](https://pi.dev) agent skill for querying Jira Cloud boards and tickets via the Agile + REST APIs. The curated commands are **read-only**; a generic `api` passthrough can reach any endpoint (including mutations) and the agent is instructed to confirm before writing.
 
 ## What it does
 
 The skill teaches the agent to:
 
 - resolve board names to numeric IDs (`boards`, `board`)
+- read board column layout with status names (`columns`)
 - inspect scrum sprints and their issues (`sprints`, `sprint`, `issues`)
 - run arbitrary read-only JQL (`search`, and `count` for exact all-time totals)
 - resolve people to accountIds for `assignee` filters (`users`)
 - read full issue detail including description (`issue`)
+- verify the authenticated account (`myself`)
+- call any other Jira REST endpoint (`api`, e.g. comments, transitions) — the only mutation path, used with explicit confirmation
 
 It also encodes the Jira API quirks verified against a live Cloud instance (2026-07):
 
@@ -55,8 +58,12 @@ Notes:
 ## Commands
 
 ```text
+bash skills/jira-board/scripts/jira.sh api <METHOD> <path> [json-body] # any Jira REST endpoint (mutation path)
+bash skills/jira-board/scripts/jira.sh myself                          # who is authenticated
+
 bash skills/jira-board/scripts/jira.sh boards [PROJECT_KEY]            # list boards
 bash skills/jira-board/scripts/jira.sh board <BOARD_ID>                # board details
+bash skills/jira-board/scripts/jira.sh columns <BOARD_ID>              # column layout, L->R, with status names
 bash skills/jira-board/scripts/jira.sh sprints <BOARD_ID>              # sprints (active first)
 bash skills/jira-board/scripts/jira.sh sprint <SPRINT_ID>              # sprint details
 bash skills/jira-board/scripts/jira.sh issues <SPRINT_ID> [--limit N]  # issues in a sprint
@@ -77,12 +84,13 @@ bash skills/jira-board/scripts/jira.sh count 'assignee = "<accountId-from-users>
 
 ## Requirements
 
-- `bash`, `curl`, `jq`, `python3` (only for URL-encoding JQL)
+- `bash`, `curl` (hard deps); `jq` and `python3` optional — without them the script emits raw JSON
 - A Jira Cloud site with an API token; `api/3` endpoints (search) plus Agile `api/1.0` (boards/sprints)
-- Read-only scope: no write/mutation endpoints are called
+- Curated commands never call write/mutation endpoints; only `api` can
 
 ## Files
 
 - `package.json` — Pi package manifest (`pi-package` keyword, declares the skill)
 - `skills/jira-board/SKILL.md` — the skill definition (agent-facing instructions + API quirks)
-- `skills/jira-board/scripts/jira.sh` — the query script (all commands, read-only)
+- `skills/jira-board/scripts/jira.sh` — the query script (all commands)
+- `skills/jira-board/references/api.md` — endpoint map for the `api` passthrough

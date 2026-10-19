@@ -1,7 +1,7 @@
 {
   "name": "jira-board-skill",
   "version": "0.1.0",
-  "description": "Pi agent skill for read-only Jira Cloud board and ticket queries (Agile + REST APIs)",
+  "description": "Pi agent skill for Jira Cloud board and ticket queries via Agile + REST APIs (read-only curated commands plus a generic api passthrough)",
   "license": "MIT",
   "keywords": [
     "pi-package",
